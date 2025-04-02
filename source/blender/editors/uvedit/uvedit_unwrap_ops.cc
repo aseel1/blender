@@ -80,6 +80,8 @@ using blender::geometry::ParamHandle;
 using blender::geometry::ParamKey;
 using blender::geometry::ParamSlimOptions;
 
+
+
 /* -------------------------------------------------------------------- */
 /** \name Utility Functions
  * \{ */
@@ -209,6 +211,9 @@ struct UnwrapOptions {
   bool use_abf;
   bool use_subsurf;
   bool use_weights;
+
+  bool continuous_optimization;  // New toggle state
+  int accumulated_iterations; // Track across calls
 
   ParamSlimOptions slim;
   char weight_group[MAX_VGROUP_NAME];
@@ -1306,6 +1311,240 @@ void UV_OT_minimize_stretch(wmOperatorType *ot)
 }
 
 /** \} */
+
+
+
+
+static void continuous_unwrap_exit(bContext *C, wmOperator *op, bool cancel);
+
+//!aseel!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11
+// struct ContinuousUnwrap {
+//   const Scene *scene;
+//   Vector<Object *> objects_edit;  // Objects in edit mode to unwrap.
+//   ParamHandle *handle;            // Persistent unwrapping state.
+//   int delta_iterations;           // Delta iterations to add each modal step.
+//   int accumulated_iterations;     // Total iterations run so far.
+//   wmTimer *timer;                 // Timer event for modal updating.
+// };
+
+// /* -------------------------------------------------------------------- */
+// /** Initialization (invoke callback)
+//  *  Here we set up our custom data and (if needed) build the initial ParamHandle.
+//  */
+// static bool continuous_unwrap_init(bContext *C, wmOperator *op)
+// {
+//   const Scene *scene = CTX_data_scene(C);
+//   ViewLayer *view_layer = CTX_data_view_layer(C);
+//   Vector<Object *> objects = BKE_view_layer_array_from_objects_in_edit_mode_unique_data_with_uvs(
+//       scene, view_layer, CTX_wm_view3d(C));
+
+//   if (!uvedit_have_selection_multi(scene, objects, nullptr)) {
+//     BKE_report(op->reports, RPT_WARNING, "No UV selection found");
+//     return false;
+//   }
+
+//   // Allocate our custom structure.
+//   ContinuousUnwrap *cu = MEM_new<ContinuousUnwrap>(__func__);
+//   cu->scene = scene;
+//   cu->objects_edit = objects;
+//   // Read delta iterations from an operator property. (Here you can also hardcode or use RNA.)
+//   cu->delta_iterations = RNA_int_get(op->ptr, "iterations");
+//   cu->accumulated_iterations = 0;
+//   cu->timer = nullptr;
+
+//   /* Persistent ParamHandle:
+//    * Check if op->customdata already holds a ParamHandle. (For example, if you re‑invoke the same operator.)
+//    * If not, we create one.
+//    */
+//   ParamHandle *handle = static_cast<ParamHandle *>(op->customdata);
+//   if (!handle) {
+//     // Construct a new handle. (For multi‑object unwrapping, use construct_param_handle_multi.)
+//     BMEditMesh *em = BKE_editmesh_from_object(objects[0]); // using first object's BMEditMesh
+//     // In your case, you might have to pass additional options.
+//     handle = construct_param_handle_multi(scene, objects, /*UnwrapOptions*/ nullptr);
+//     op->customdata = handle;
+//   }
+//   cu->handle = handle;
+
+//   // (If your SLIM solver has a "live" mode, you might call uv_parametrizer_slim_live_begin() here.)
+//   // For our purposes, we assume that uv_parametrizer_slim_solve() (called later) will use the
+//   // current state because we pass skip_init=true.
+
+//   // Store our custom data in op->customdata.
+//   op->customdata = cu;
+//   return true;
+// }
+
+
+
+// /* -------------------------------------------------------------------- */
+// /** Iteration function (called per timer event)
+//  *  This function calls your SLIM solver using the delta iteration count and flushes the result.
+//  */
+// static void continuous_unwrap_iteration(bContext *C, wmOperator *op, bool interactive)
+// {
+//   ContinuousUnwrap *cu = static_cast<ContinuousUnwrap *>(op->customdata);
+
+//   // Prepare SLIM options. These are the "delta" iterations to add.
+//   ParamSlimOptions slim_opts;
+//   slim_opts.iterations = cu->delta_iterations;  // Only add this many extra iterations.
+//   slim_opts.skip_init = true; // Do not reinitialize – continue from previous state.
+//   // (Set additional fields if needed, e.g., weight_influence, no_flip, etc.)
+
+//   printf("[DEBUG] Continuous Unwrap: Adding %d iterations (Total will be %d)\n",
+//          slim_opts.iterations,
+//          cu->accumulated_iterations + slim_opts.iterations);
+
+//   // Call your SLIM solver with the delta.
+//   uv_parametrizer_slim_solve(cu->handle, &slim_opts, nullptr, nullptr);
+
+//   // Update the accumulated iterations.
+//   cu->accumulated_iterations += slim_opts.iterations;
+
+//   // Flush the updated UVs to the mesh.
+//   uv_parametrizer_flush(cu->handle);
+
+//   // Notify geometry changes.
+//   for (Object *obedit : cu->objects_edit) {
+//     DEG_id_tag_update(static_cast<ID *>(obedit->data), ID_RECALC_GEOMETRY);
+//     WM_event_add_notifier(C, NC_GEOM | ND_DATA, obedit->data);
+//   }
+
+//   // Optionally update status text if interactive.
+//   if (interactive) {
+//     ScrArea *area = CTX_wm_area(C);
+//     if (area) {
+//       char status[UI_MAX_DRAW_STR];
+//       SNPRINTF(status, IFACE_("Continuous Unwrap: Total Iterations %d"),
+//                  cu->accumulated_iterations);
+//       ED_area_status_text(area, status);
+//     }
+//   }
+// }
+
+// /* -------------------------------------------------------------------- */
+// /** Modal Callback
+//  *  This callback receives timer events (and key/mouse events if desired) and calls our iteration function.
+//  */
+// static int continuous_unwrap_modal(bContext *C, wmOperator *op, const wmEvent *event)
+// {
+//   ContinuousUnwrap *cu = static_cast<ContinuousUnwrap *>(op->customdata);
+
+//   switch (event->type) {
+//     case EVT_ESCKEY:
+//     case RIGHTMOUSE:
+//       // Cancel operator
+//       continuous_unwrap_exit(C, op, true);
+//       return OPERATOR_CANCELLED;
+//     case EVT_RETKEY:
+//     case LEFTMOUSE:
+//       // Confirm and finish operator
+//       continuous_unwrap_exit(C, op, false);
+//       return OPERATOR_FINISHED;
+//     case TIMER:
+//       if (cu->timer == event->customdata) {
+//         // Process as many delta iterations as we can in 0.01 sec
+//         double start = BLI_time_now_seconds();
+//         do {
+//           continuous_unwrap_iteration(C, op, true);
+//         } while (BLI_time_now_seconds() - start < 0.01);
+//       }
+//       break;
+//   }
+//   return OPERATOR_RUNNING_MODAL;
+// }
+
+// /* -------------------------------------------------------------------- */
+// /** Exit Callback
+//  *  Cleans up the operator (removes timer, frees custom data, etc.)
+//  */
+// static void continuous_unwrap_exit(bContext *C, wmOperator *op, bool cancel)
+// {
+//   ContinuousUnwrap *cu = static_cast<ContinuousUnwrap *>(op->customdata);
+//   if (cu->timer) {
+//     WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), cu->timer);
+//   }
+
+//   // If cancel, you may want to restore the previous UVs.
+//   if (cancel) {
+//     uv_parametrizer_flush_restore(cu->handle);
+//   }
+//   else {
+//     uv_parametrizer_flush(cu->handle);
+//   }
+
+//   // End any live SLIM session if applicable.
+//   // uv_parametrizer_slim_live_end(cu->handle);
+
+//   // Here you decide if you want to free the persistent ParamHandle.
+//   // In this example we delete it.
+//   delete(cu->handle);
+//   op->customdata = nullptr;
+//   MEM_delete(cu);
+
+//   // Clear status texts.
+//   ScrArea *area = CTX_wm_area(C);
+//   if (area) {
+//     ED_area_status_text(area, nullptr);
+//     ED_workspace_status_text(C, nullptr);
+//   }
+// }
+
+// /* -------------------------------------------------------------------- */
+// /** Invoke Callback
+//  *  Called when the operator is first executed. It initializes our custom data,
+//  *  calls one initial iteration, adds a timer, and then sets the operator modal.
+//  */
+// static int continuous_unwrap_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+// {
+//   if (!continuous_unwrap_init(C, op)) {
+//     return OPERATOR_CANCELLED;
+//   }
+
+//   continuous_unwrap_iteration(C, op, true);  // Run one iteration immediately.
+
+//   WM_event_add_modal_handler(C, op);
+//   ContinuousUnwrap *cu = static_cast<ContinuousUnwrap *>(op->customdata);
+//   cu->timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 0.01f);
+//   return OPERATOR_RUNNING_MODAL;
+// }
+
+// /* -------------------------------------------------------------------- */
+// /** Cancel Callback (optional) */
+// static void continuous_unwrap_cancel(bContext *C, wmOperator *op)
+// {
+//   continuous_unwrap_exit(C, op, true);
+// }
+
+// /* -------------------------------------------------------------------- */
+// /** Operator Registration */
+// void UV_OT_continuous_unwrap(wmOperatorType *ot)
+// {
+//   ot->name = "Continuous UV Unwrap";
+//   ot->idname = "UV_OT_continuous_unwrap";
+//   ot->description = "Continuously optimize UV mapping by adding delta iterations";
+//   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_BLOCKING;
+
+//   ot->invoke = continuous_unwrap_invoke;
+//   ot->modal = continuous_unwrap_modal;
+//   ot->cancel = continuous_unwrap_cancel;
+//   ot->poll = ED_operator_uvedit; // Only available in UV edit mode.
+
+//   // Define properties. For example, the number of delta iterations per step.
+//   RNA_def_int(ot->srna,
+//               "iterations",
+//               10,
+//               1,
+//               10000,
+//               "Delta Iterations",
+//               "Number of additional iterations to run per update",
+//               1,
+//               100);
+//   // You can add more properties (e.g. blend factor, etc.) as needed.
+// }
+
+
+//!asee!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!;
 
 static void island_uv_transform(FaceIsland *island,
                                 const float matrix[2][2],    /* Scale and rotation. */
@@ -2543,6 +2782,7 @@ static void correct_uv_aspect_per_face(Object *ob, BMEditMesh *em)
 /* -------------------------------------------------------------------- */
 /** \name UV Map Clip & Correct
  * \{ */
+bool continuous_optimization;
 
 static void uv_map_clip_correct_properties_ex(wmOperatorType *ot, bool clip_to_bounds)
 {
@@ -2684,35 +2924,70 @@ static void uv_map_clip_correct(const Scene *scene,
 
 /** \} */
 
-/* -------------------------------------------------------------------- */
-/** \name UV Unwrap Operator
- * \{ */
-
-/* Assumes UV Map exists, doesn't run update functions. */
+/* Example global pointer for storing the persistent handle. */
+static ParamHandle *g_uv_continuous_handle = nullptr;
 static void uvedit_unwrap(const Scene *scene,
                           Object *obedit,
                           const UnwrapOptions *options,
+                          wmOperator *op,
                           int *r_count_changed,
                           int *r_count_failed)
 {
   BMEditMesh *em = BKE_editmesh_from_object(obedit);
   if (!CustomData_has_layer(&em->bm->ldata, CD_PROP_FLOAT2)) {
-    return;
+    return; /* No UV layer at all. */
   }
 
   bool use_subsurf;
   modifier_unwrap_state(obedit, options, &use_subsurf);
 
-  ParamHandle *handle;
-  if (use_subsurf) {
-    handle = construct_param_handle_subsurfed(scene, obedit, em, options, r_count_failed);
+  ParamHandle *handle = nullptr;
+  bool is_first_time = false;
+
+  if (options->continuous_optimization) {
+    /* --- CONTINUOUS (PERSISTENT) MODE --- */
+    if (g_uv_continuous_handle == nullptr) {
+      /* First time: build a new handle and store it globally. */
+      is_first_time = true;
+      if (use_subsurf) {
+        g_uv_continuous_handle = construct_param_handle_subsurfed(
+            scene, obedit, em, options, r_count_failed);
+      }
+      else {
+        printf("builidng param first time ");
+        g_uv_continuous_handle = construct_param_handle(
+            scene, obedit, em->bm, options, r_count_failed);
+      }
+      if (g_uv_continuous_handle) {
+        g_uv_continuous_handle->accumulated_iterations = 0;
+      }
+    }
+    handle = g_uv_continuous_handle;
   }
   else {
-    handle = construct_param_handle(scene, obedit, em->bm, options, r_count_failed);
+    /* --- REGULAR (ONE-SHOT) MODE --- */
+    if (use_subsurf) {
+      handle = construct_param_handle_subsurfed(scene, obedit, em, options, r_count_failed);
+    }
+    else {
+      handle = construct_param_handle(scene, obedit, em->bm, options, r_count_failed);
+    }
   }
 
+  
+  /* Decide whether to skip the solver’s initialization. */
+  ParamSlimOptions slim_opts = options->slim;
+  slim_opts.skip_init = (options->continuous_optimization && !is_first_time);
+
+
+
   if (options->use_slim) {
-    uv_parametrizer_slim_solve(handle, &options->slim, r_count_changed, r_count_failed);
+    printf("[SLIM] Continuous: %d | Iters: %d | Skip Init: %d\n",
+           options->continuous_optimization,
+           slim_opts.iterations,
+           slim_opts.skip_init);
+
+    uv_parametrizer_slim_solve(handle, &slim_opts, r_count_changed, r_count_failed);
   }
   else {
     blender::geometry::uv_parametrizer_lscm_begin(handle, false, options->use_abf);
@@ -2720,21 +2995,38 @@ static void uvedit_unwrap(const Scene *scene,
     blender::geometry::uv_parametrizer_lscm_end(handle);
   }
 
-  blender::geometry::uv_parametrizer_average(handle, true, false, false);
+  /* 
+   * IMPORTANT: If you never pin any UVs, the solver can fold up or drift.
+   * A common fix is to do an "average" or "pack" step so it doesn't
+   * collapse. Or you can pin some UVs. 
+   */
+  blender::geometry::uv_parametrizer_average(
+      handle, /*ignore_pinned=*/true, /*scale_uv=*/false, /*shear=*/false);
 
+  /* Write the newly solved UVs back to the mesh. */
   blender::geometry::uv_parametrizer_flush(handle);
 
-  delete (handle);
+  /* If not in continuous mode, free the handle. Otherwise, keep it for the next iteration. */
+  if (!options->continuous_optimization) {
+    delete handle;
+    op->customdata = nullptr;
+  }
+  else {
+    /* We keep the handle around, so we can skip_init next time. */
+    op->customdata = g_uv_continuous_handle;
+  }
 }
+
 
 static void uvedit_unwrap_multi(const Scene *scene,
                                 const Span<Object *> objects,
                                 const UnwrapOptions *options,
+                                wmOperator *op,
                                 int *r_count_changed = nullptr,
                                 int *r_count_failed = nullptr)
 {
   for (Object *obedit : objects) {
-    uvedit_unwrap(scene, obedit, options, r_count_changed, r_count_failed);
+    uvedit_unwrap(scene, obedit, options, op, r_count_changed, r_count_failed);
     DEG_id_tag_update(static_cast<ID *>(obedit->data), ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, obedit->data);
   }
@@ -2748,7 +3040,7 @@ void ED_uvedit_live_unwrap(const Scene *scene, const Span<Object *> objects)
     options.only_selected_faces = false;
     options.only_selected_uvs = false;
 
-    uvedit_unwrap_multi(scene, objects, &options, nullptr);
+    uvedit_unwrap_multi(scene, objects, &options, nullptr, nullptr);
 
     blender::geometry::UVPackIsland_Params pack_island_params;
     pack_island_params.setFromUnwrapOptions(options);
@@ -2781,13 +3073,22 @@ static int unwrap_exec(bContext *C, wmOperator *op)
   options.topology_from_uvs = false;
   options.only_selected_faces = true;
   options.only_selected_uvs = false;
+  options.continuous_optimization = RNA_boolean_get(op->ptr, "continuous_optimization"); // toggler true or false for continous optimization
+
+  // Handle iteration mode
+  if (options.continuous_optimization) {
+    options.slim.iterations = RNA_int_get(op->ptr, "iterations");  // Delta iterations
+    options.slim.skip_init = true;
+  } else {
+    options.slim.iterations = RNA_int_get(op->ptr, "iterations");  // Total iterations
+    options.slim.skip_init = false;
+  }
 
   /* We will report an error unless at least one object
    * has the subsurf modifier in the right place. */
   bool subsurf_error = options.use_subsurf;
 
   if (CTX_wm_space_image(C)) {
-    /* Inside the UV Editor, only unwrap selected UVs. */
     options.only_selected_uvs = true;
     options.pin_unselected = true;
   }
@@ -2796,60 +3097,48 @@ static int unwrap_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  /* add uvs if they don't exist yet */
+  /* Validate objects and prepare UVs */
   for (Object *obedit : objects) {
     float obsize[3];
     bool use_subsurf_final;
 
-    if (!ED_uvedit_ensure_uvs(obedit)) {
-      continue;
-    }
+    if (!ED_uvedit_ensure_uvs(obedit)) continue;
 
     if (subsurf_error) {
-      /* Double up the check here but better keep uvedit_unwrap interface simple and not
-       * pass operator for warning append. */
       modifier_unwrap_state(obedit, &options, &use_subsurf_final);
-      if (use_subsurf_final) {
-        subsurf_error = false;
-      }
+      if (use_subsurf_final) subsurf_error = false;
     }
 
-    if (reported_errors & (UNWRAP_ERROR_NONUNIFORM | UNWRAP_ERROR_NEGATIVE)) {
-      continue;
-    }
+    if (reported_errors & (UNWRAP_ERROR_NONUNIFORM | UNWRAP_ERROR_NEGATIVE)) continue;
 
     mat4_to_size(obsize, obedit->object_to_world().ptr());
     if (!(fabsf(obsize[0] - obsize[1]) < 1e-4f && fabsf(obsize[1] - obsize[2]) < 1e-4f)) {
       if ((reported_errors & UNWRAP_ERROR_NONUNIFORM) == 0) {
-        BKE_report(op->reports,
-                   RPT_INFO,
-                   "Object has non-uniform scale, unwrap will operate on a non-scaled version of "
-                   "the mesh");
+        BKE_report(op->reports, RPT_INFO,
+                   "Object has non-uniform scale, using non-scaled version");
         reported_errors |= UNWRAP_ERROR_NONUNIFORM;
       }
     }
     else if (is_negative_m4(obedit->object_to_world().ptr())) {
       if ((reported_errors & UNWRAP_ERROR_NEGATIVE) == 0) {
-        BKE_report(
-            op->reports,
-            RPT_INFO,
-            "Object has negative scale, unwrap will operate on a non-flipped version of the mesh");
+        BKE_report(op->reports, RPT_INFO,
+                   "Object has negative scale, using non-flipped version");
         reported_errors |= UNWRAP_ERROR_NEGATIVE;
       }
     }
   }
 
   if (subsurf_error) {
-    BKE_report(op->reports,
-               RPT_INFO,
-               "Subdivision Surface modifier needs to be first to work with unwrap");
+    BKE_report(op->reports, RPT_INFO,
+               "Subdivision Surface modifier needs to be first");
   }
 
   /* execute unwrap */
   int count_changed = 0;
   int count_failed = 0;
-  uvedit_unwrap_multi(scene, objects, &options, &count_changed, &count_failed);
-
+  
+  uvedit_unwrap_multi(scene, objects, &options, op, &count_changed, &count_failed);
+    
   blender::geometry::UVPackIsland_Params pack_island_params;
   pack_island_params.setFromUnwrapOptions(options);
   pack_island_params.rotate_method = ED_UVPACK_ROTATION_ANY;
@@ -2860,22 +3149,18 @@ static int unwrap_exec(bContext *C, wmOperator *op)
 
   uvedit_pack_islands_multi(scene, objects, nullptr, nullptr, false, true, &pack_island_params);
 
+  /* Report results */
   if (count_failed == 0 && count_changed == 0) {
-    BKE_report(op->reports,
-               RPT_WARNING,
-               "Unwrap could not solve any island(s), edge seams may need to be added");
+    BKE_report(op->reports, RPT_WARNING,
+               "Unwrap failed - add edge seams");
   }
   else if (count_failed) {
-    BKE_reportf(op->reports,
-                RPT_WARNING,
-                "Unwrap failed to solve %d of %d island(s), edge seams may need to be added",
-                count_failed,
-                count_changed + count_failed);
+    BKE_reportf(op->reports, RPT_WARNING,
+                "Failed %d/%d islands", count_failed, count_changed + count_failed);
   }
 
   return OPERATOR_FINISHED;
 }
-
 static void unwrap_draw(bContext * /*C*/, wmOperator *op)
 {
   uiLayout *layout = op->layout;
@@ -2895,6 +3180,8 @@ static void unwrap_draw(bContext * /*C*/, wmOperator *op)
   if (is_slim) {
     uiItemR(col, &ptr, "iterations", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     uiItemR(col, &ptr, "no_flip", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    uiItemR(col, &ptr, "continuous_optimization", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
 
     uiItemS(col);
     uiItemR(col, &ptr, "use_weights", UI_ITEM_NONE, std::nullopt, ICON_NONE);
@@ -2942,6 +3229,15 @@ void UV_OT_unwrap(wmOperatorType *ot)
   /* Only draw relevant ui elements */
   ot->ui = unwrap_draw;
 
+  // ... existing code ...
+  ot->cancel = [](bContext *C, wmOperator *op) {
+    if (op->customdata) {
+      ParamHandle *handle = static_cast<ParamHandle *>(op->customdata);
+      delete handle;
+      op->customdata = nullptr;
+    }
+  };
+  
   /* properties */
   ot->prop = RNA_def_enum(
       ot->srna,
@@ -2959,6 +3255,13 @@ void UV_OT_unwrap(wmOperatorType *ot)
                   "preserve symmetry");
 
   uv_map_operator_property_correct_aspect(ot);
+
+  
+  RNA_def_boolean(ot->srna,
+    "continuous_optimization",
+    false,
+    "Continuous Optimization",
+    "Continue from previous UV state instead of restarting iterations");
 
   RNA_def_boolean(
       ot->srna,

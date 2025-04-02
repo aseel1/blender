@@ -4375,6 +4375,11 @@ void uv_parametrizer_average(ParamHandle *phandle, bool ignore_pinned, bool scal
   }
 }
 
+
+
+
+
+
 void uv_parametrizer_flush(ParamHandle *phandle)
 {
   for (int i = 0; i < phandle->ncharts; i++) {
@@ -5140,8 +5145,16 @@ static void slim_convert_blender(ParamHandle *phandle, slim::MatrixTransfer *mt)
 
 static void slim_transfer_data_to_slim(ParamHandle *phandle, const ParamSlimOptions *slim_options)
 {
-  slim::MatrixTransfer *mt = slim_matrix_transfer(slim_options);
 
+  // If we're in continuous mode AND we already have a solver, just update UVs.
+  if (slim_options->skip_init && phandle->slim_mt != nullptr) {
+    // e.g. call a separate function that copies the current UVs
+    // from the mesh into the solver, if needed.
+    // Or do nothing if you already have up-to-date UVs in the solver.
+    printf("reusing previous handler");
+    return;
+  }
+  slim::MatrixTransfer *mt = slim_matrix_transfer(slim_options);
   slim_convert_blender(phandle, mt);
   phandle->slim_mt = mt;
 }
@@ -5163,6 +5176,8 @@ static void slim_flush_uvs(ParamHandle *phandle,
     slim::MatrixTransferChart *mt_chart = &mt->charts[i];
 
     if (mt_chart->succeeded) {
+      printf("[DEBUG] Chart %d succeeded | UVs updated\n", i);
+
       if (count_changed) {
         (*count_changed)++;
       }
@@ -5183,7 +5198,8 @@ static void slim_flush_uvs(ParamHandle *phandle,
         (*count_failed)++;
       }
 
-      if (!live) {
+          // Only reset UVs if NOT skipping initialization (new condition)
+      if (!live && !mt->skip_initialization) { // <-- Add `!mt->skip_initialization`
         for (v = chart->verts; v; v = v->nextlink) {
           v->uv[0] = 0.0f;
           v->uv[1] = 0.0f;
@@ -5261,25 +5277,51 @@ static void slim_get_pinned_vertex_data(ParamHandle *phandle,
 /** \name SLIM Integration (Public API)
  * \{ */
 
-void uv_parametrizer_slim_solve(ParamHandle *phandle,
-                                const ParamSlimOptions *slim_options,
-                                int *count_changed,
-                                int *count_failed)
-{
-#ifdef WITH_UV_SLIM
-  slim_transfer_data_to_slim(phandle, slim_options);
-  slim::MatrixTransfer *mt = phandle->slim_mt;
+ void uv_parametrizer_slim_solve(ParamHandle *phandle,
+                                 const ParamSlimOptions *slim_options,
+                                 int *count_changed,
+                                 int *count_failed)
+ {
+ #ifdef WITH_UV_SLIM
+   // In continuous mode (skip_init true) and if a solver already exists, update its current UVs.
+   if (!phandle->slim_mt) {
+    // First-time initialization
+    slim_transfer_data_to_slim(phandle, slim_options);
+    phandle->accumulated_iterations = 0;
+  } 
+  else if (!slim_options->skip_init) {
+    // Force re-init (non-continuous mode)
+    slim_free_matrix_transfer(phandle);
+    slim_transfer_data_to_slim(phandle, slim_options);
+    phandle->accumulated_iterations = 0;
+  }
 
-  mt->parametrize();
-
-  slim_flush_uvs(phandle, mt, count_changed, count_failed);
-  slim_free_matrix_transfer(phandle);
-#else
-  *count_changed = 0;
-  *count_failed = 0;
-  UNUSED_VARS(phandle, slim_options, count_changed, count_failed);
-#endif /* !WITH_UV_SLIM */
-}
+   slim::MatrixTransfer *mt = phandle->slim_mt;
+   
+   // Use the iterations value as the delta (number of extra iterations to perform).
+   mt->n_iterations = slim_options->iterations;
+   printf("[SLIM] Running %d extra iterations\n", mt->n_iterations);
+   
+   // Run the solver for the extra iterations.
+   mt->parametrize();
+   
+   // (Optional: if you wish to track total iterations in a persistent counter,
+   // update it here – e.g. add mt->n_iterations to a counter stored in UnwrapOptions.)
+   
+   // Flush the updated UVs back to the mesh.
+   slim_flush_uvs(phandle, mt, count_changed, count_failed);
+   
+   // In non-continuous mode, free the solver state after use.
+   if (!slim_options->skip_init) {
+     slim_free_matrix_transfer(phandle);
+   }
+ #else
+   *count_changed = 0;
+   *count_failed = 0;
+   UNUSED_VARS(phandle, slim_options, count_changed, count_failed);
+ #endif /* WITH_UV_SLIM */
+ }
+ 
 
 void uv_parametrizer_slim_live_begin(ParamHandle *phandle, const ParamSlimOptions *slim_options)
 {

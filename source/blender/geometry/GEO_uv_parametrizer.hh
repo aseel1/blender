@@ -62,6 +62,9 @@ class ParamHandle {
 
   /* SLIM uv unwrapping */
   slim::MatrixTransfer *slim_mt = nullptr;
+  int accumulated_iterations; // Track total iterations
+  bool continuous_optimization;
+
 };
 
 /* -------------------------------------------------------------------- */
@@ -130,6 +133,8 @@ void uv_parametrizer_slim_live_end(ParamHandle *phandle);
 void uv_parametrizer_slim_stretch_iteration(ParamHandle *phandle, float blend);
 bool uv_parametrizer_is_slim(const ParamHandle *phandle);
 
+
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -184,6 +189,10 @@ void uv_parametrizer_average(ParamHandle *handle, bool ignore_pinned, bool scale
 
 void uv_parametrizer_flush(ParamHandle *handle);
 void uv_parametrizer_flush_restore(ParamHandle *handle);
+void uv_parametrizer_slim_flush_and_sync(ParamHandle *phandle,
+  const ParamSlimOptions *slim_options,
+  int *count_changed,
+  int *count_failed);
 
 /** \} */
 
